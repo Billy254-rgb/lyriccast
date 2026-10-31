@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LyricCast Output</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:transparent;cursor:none;pointer-events:none;user-select:none;-webkit-user-select:none}
+#pos{position:absolute;left:0;right:0;display:flex;box-sizing:border-box;padding:0 5vw}
+#lt{position:relative;box-sizing:border-box;max-width:100%;overflow:hidden;transition:opacity var(--d,.3s) ease,transform var(--d,.3s) ease;will-change:opacity,transform}
+#lt.off{opacity:0;transform:translateY(var(--hide,0px))}
+#accent{position:absolute;left:0;top:0;bottom:0}
+#tag{display:none;opacity:.8;margin-bottom:.25em;font-weight:600}
+#lines{display:grid}
+.ly{grid-area:1/1;opacity:0;transform:translateY(var(--shift,0));transition:opacity var(--d,.3s) ease,transform var(--d,.3s) ease;overflow:hidden;white-space:nowrap;will-change:opacity,transform}
+.ly.on{opacity:1;transform:none}
+.ly.out{opacity:0;transform:translateY(calc(var(--shift,0px)*-1))}
+#nextl{display:none;opacity:.6;margin-top:.3em;white-space:nowrap;overflow:hidden}
+#dot{position:fixed;right:8px;top:8px;width:10px;height:10px;border-radius:50%;background:#f55;display:none}
+</style>
+</head>
+<body>
+<div id="pos"><div id="lt" class="off"><div id="accent"></div><div id="tag"></div><div id="lines"><div class="ly" id="la"></div><div class="ly" id="lb"></div></div><div id="nextl"></div></div></div>
+<div id="dot"></div>
+<script>
+(function(){
+'use strict';
+var code=decodeURIComponent(location.pathname.split('/').pop()||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+var P=new URLSearchParams(location.search), preview=P.get('preview')==='1', debug=P.get('debug')==='1';
+var bg=P.get('bg'); if(bg){ if(bg==='green')bg='#00ff00'; else if(bg==='blue')bg='#0000ff'; else if(/^[0-9a-f]{6}$/i.test(bg))bg='#'+bg; if(/^#[0-9a-f]{6}$/i.test(bg))document.body.style.background=bg; }
+var FONTS={sans:'Inter,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif',serif:'Georgia,"Times New Roman",serif',mono:'ui-monospace,Consolas,"Courier New",monospace',rounded:'"Trebuchet MS","Segoe UI",system-ui,sans-serif',condensed:'"Arial Narrow","Roboto Condensed",Impact,sans-serif',display:'Impact,"Arial Black",sans-serif'};
+var $=function(i){return document.getElementById(i)};
+var pos=$('pos'),lt=$('lt'),tag=$('tag'),nextl=$('nextl'),acc=$('accent'),layers=[$('la'),$('lb')],active=0,cur='',curKey='',S=null,hideT=null;
+function rgba(h,a){var n=parseInt(h.slice(1),16);return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')'}
+function fit(el,st,u){
+  var maxW=Math.max(100,innerWidth*0.9-st.padX*2*u-(st.accent&&st.bar?10*u:0)), fs=st.size*u, lh=st.lh;
+  el.style.fontSize=fs+'px'; el.style.maxWidth=maxW+'px';
+  if(st.fit==='full'){el.style.width=maxW+'px'}else{el.style.width=''}
+  if(st.rows===2){
+    el.style.whiteSpace='normal'; el.style.width=maxW+'px';
+    for(var i=0;i<40&&el.scrollHeight>fs*lh*2+2&&fs>12;i++){fs*=0.95;el.style.fontSize=fs+'px'}
+  }else{
+    el.style.whiteSpace='nowrap';
+    for(var j=0;j<60&&el.scrollWidth>el.clientWidth+1&&fs>12;j++){fs*=0.96;el.style.fontSize=fs+'px'}
+  }
+}
+function styleAll(st){
+  var u=innerHeight/1080, d=st.anim==='cut'?0:st.dur;
+  document.documentElement.style.setProperty('--d',d+'ms');
+  document.documentElement.style.setProperty('--shift',st.anim==='slide'?(st.size*0.45*u)+'px':'0px');
+  document.documentElement.style.setProperty('--hide',st.anim==='slide'?(40*u)+'px':'0px');
+  pos.style.bottom=(st.offY*u)+'px'; pos.style.transform='translateX('+(st.offX*u)+'px)';
+  pos.style.justifyContent=st.pos==='left'?'flex-start':st.pos==='right'?'flex-end':'center';
+  lt.style.width=st.fit==='full'?'100%':'auto';
+  lt.style.padding=(st.padY*u)+'px '+(st.padX*u)+'px'; lt.style.paddingLeft=(st.padX*u+(st.accent&&st.bar?10*u:0))+'px';
+  lt.style.borderRadius=st.bar?(st.radius*u)+'px':'0';
+  lt.style.background=st.bar?rgba(st.barColor,st.barOpacity):'transparent';
+  lt.style.backdropFilter=lt.style.webkitBackdropFilter=st.bar&&st.blur?'blur('+(st.blur*u)+'px)':'none';
+  lt.style.textAlign=st.align;
+  acc.style.display=st.accent&&st.bar?'block':'none'; acc.style.width=(10*u)+'px'; acc.style.background=st.accentColor;
+  [lt].concat(layers).forEach(function(e){
+    e.style.fontFamily=FONTS[st.font]; e.style.fontWeight=st.weight; e.style.letterSpacing=(st.spacing*u)+'px'; e.style.lineHeight=st.lh;
+    e.style.color=st.color; e.style.textTransform=st.upper?'uppercase':'none';
+    e.style.textShadow=st.shadow?'0 '+(2*u)+'px '+(st.shadow*u)+'px '+st.shadowColor:'none';
+    e.style.webkitTextStroke=st.outline?(st.outline*u)+'px '+st.outlineColor:'0'; e.style.paintOrder='stroke fill';
+  });
+  tag.style.fontSize=(st.size*0.38*u)+'px'; tag.style.color=st.accentColor;
+  nextl.style.fontSize=(st.size*st.nextScale*u)+'px';
+}
+function setText(el,txt,st){el.textContent=txt; fit(el,st,innerHeight/1080)}
+function apply(s){
+  S=s; var st=s.style, u=innerHeight/1080, text=s.line||'', show=!!(s.visible&&text);
+  var key=JSON.stringify(st); if(key!==curKey){curKey=key; styleAll(st); if(cur)fit(layers[active],st,u)}
+  if(st.showTag&&s.tag&&(s.title||s.artist)){tag.style.display='block';tag.textContent=[s.title,s.artist].filter(Boolean).join('  \u2014  ')}else tag.style.display='none';
+  if(st.showNext&&s.next){nextl.style.display='block';nextl.textContent=s.next}else nextl.style.display='none';
+  if(text!==cur){
+    var wasHidden=lt.classList.contains('off'), old=layers[active], nw=layers[1-active]; cur=text;
+    clearTimeout(hideT);
+    if(wasHidden||!text||st.anim==='cut'){
+      old.classList.remove('on','out'); nw.classList.remove('on','out'); nw.textContent=''; setText(old,text,st); if(text)old.classList.add('on');
+    }else{
+      setText(nw,text,st); nw.classList.remove('out'); void nw.offsetWidth;
+      old.classList.remove('on'); old.classList.add('out'); nw.classList.add('on'); active=1-active;
+      hideT=setTimeout(function(){old.classList.remove('out');old.textContent=''},st.dur+80);
+    }
+  }
+  lt.classList.toggle('off',!show);
+}
+/* ---------- connection: WebSocket -> SSE -> polling, with auto reconnect ---------- */
+var mode='ws',fails=0,ws=null,es=null,pollT=null,backoff=500,dot=$('dot');
+function status(ok){if(debug){dot.style.display='block';dot.style.background=ok?'#3d9':'#f55'}}
+function onMsg(m){var d;try{d=JSON.parse(m)}catch(e){return}if(d.t==='state')apply(d.state)}
+function openWS(){
+  var opened=false, url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?code='+code+'&role='+(preview?'preview':'output');
+  try{ws=new WebSocket(url)}catch(e){return fallback()}
+  ws.onopen=function(){opened=true;fails=0;backoff=500;status(true)};
+  ws.onmessage=function(e){onMsg(e.data)};
+  ws.onclose=function(e){status(false);if(e.code===4004)return;if(!opened&&++fails>=3)return fallback();setTimeout(openWS,backoff);backoff=Math.min(backoff*2,8000)};
+}
+function openSSE(){
+  mode='sse'; var t=0;
+  es=new EventSource('/api/s/'+code+'/events'+(preview?'?role=preview':''));
+  es.onopen=function(){t=0;status(true)};
+  es.onmessage=function(e){onMsg(e.data)};
+  es.onerror=function(){status(false);if(++t>=4){es.close();openPoll()}};
+}
+function openPoll(){
+  mode='poll'; clearInterval(pollT);
+  pollT=setInterval(function(){fetch('/api/s/'+code+'/state',{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).then(function(s){if(s){status(true);apply(s)}}).catch(function(){status(false)})},1000);
+}
+function fallback(){openSSE()}
+window.addEventListener('resize',function(){curKey='';if(S)apply(S)});
+if(code)openWS();
+})();
+</script>
+</body>
+</html>
