@@ -26,7 +26,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:transparent;cursor:non
 (function(){
 'use strict';
 var code=decodeURIComponent(location.pathname.split('/').pop()||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-var P=new URLSearchParams(location.search), preview=P.get('preview')==='1', debug=P.get('debug')==='1';
+var P=new URLSearchParams(location.search), preview=P.get('preview')==='1', debug=P.get('debug')==='1', localMode=P.get('local')==='1';
 var bg=P.get('bg'); if(bg){ if(bg==='green')bg='#00ff00'; else if(bg==='blue')bg='#0000ff'; else if(/^[0-9a-f]{6}$/i.test(bg))bg='#'+bg; if(/^#[0-9a-f]{6}$/i.test(bg))document.body.style.background=bg; }
 var FONTS={sans:'Inter,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif',serif:'Georgia,"Times New Roman",serif',mono:'ui-monospace,Consolas,"Courier New",monospace',rounded:'"Trebuchet MS","Segoe UI",system-ui,sans-serif',condensed:'"Arial Narrow","Roboto Condensed",Impact,sans-serif',display:'Impact,"Arial Black",sans-serif'};
 var $=function(i){return document.getElementById(i)};
@@ -110,7 +110,8 @@ function openPoll(){
 }
 function fallback(){openSSE()}
 window.addEventListener('resize',function(){curKey='';if(S)apply(S)});
-if(code)openWS();
+if(localMode){window.addEventListener('message',function(e){if(e.origin===location.origin&&e.data&&e.data.lc&&e.data.state)apply(e.data.state)})}
+else if(code)openWS();
 })();
 </script>
 </body>

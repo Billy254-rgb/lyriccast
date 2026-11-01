@@ -84,7 +84,7 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use((req, res, next) => { res.set('X-Content-Type-Options', 'nosniff'); next(); });
-app.use(express.json({ limit: '3mb' }));
+app.use(express.json({ limit: '6mb' }));
 
 const hits = new Map();
 function limiter(max, windowMs) {
@@ -102,15 +102,27 @@ const sendPage = f => (req, res) => res.sendFile(path.join(__dirname, f));
 app.get('/', sendPage('controller.html'));
 app.get('/o/:code', (req, res) => { res.set('Cache-Control', 'no-store'); res.sendFile(path.join(__dirname, 'output.html')); });
 app.get('/sw.js', sendPage('sw.js'));
+app.get('/app.js', sendPage('app.js'));
 app.get('/manifest.webmanifest', sendPage('manifest.webmanifest'));
 app.get('/icon.svg', sendPage('icon.svg'));
 app.get('/healthz', (req, res) => res.send('ok'));
 
+function makeSession(key) {
+  return { key, created: Date.now(), style: Object.assign({}, DEFAULT_STYLE), libRev: 0,
+    lib: { songs: [], schedules: [], presets: [], tomb: {} },
+    live: { line: '', next: '', title: '', artist: '', tag: false, visible: false, rev: 0 } };
+}
 app.post('/api/session', limiter(10, 3600000), (req, res) => {
   const code = newCode(), key = crypto.randomBytes(18).toString('hex');
-  db.sessions[code] = { key, created: Date.now(), songs: [], presets: [], style: Object.assign({}, DEFAULT_STYLE),
-    live: { line: '', next: '', title: '', artist: '', tag: false, visible: false, rev: 0 } };
-  save(); res.json({ code, key });
+  db.sessions[code] = makeSession(key); save(); res.json({ code, key });
+});
+// Lets a controller re-register its own code and key if the server lost its data (for example a free host restart).
+app.post('/api/session/restore', limiter(30, 3600000), (req, res) => {
+  const code = String((req.body && req.body.code) || '').toUpperCase(), key = String((req.body && req.body.key) || '');
+  if (!/^[A-HJKMNP-Z2-9]{6}$/.test(code) || !/^[a-f0-9]{36}$/.test(key)) return res.status(400).json({ error: 'Invalid code or key' });
+  const s = db.sessions[code];
+  if (s) return eq(key, s.key) ? res.json({ fresh: false }) : res.status(409).json({ error: 'That code belongs to another session' });
+  db.sessions[code] = makeSession(key); save(); res.json({ fresh: true });
 });
 
 // public (read-only) endpoints used by the output page and vMix data sources
@@ -136,37 +148,41 @@ function auth(req, res, next) {
   if (!s || !eq(req.get('x-key') || '', s.key)) return res.status(401).json({ error: 'Invalid session or key' });
   req.code = code; req.ses = s; next();
 }
-app.get('/api/s/:code/data', auth, (req, res) => res.json({ songs: req.ses.songs, presets: req.ses.presets, state: pub(req.ses) }));
-
-function cleanSong(b, old) {
-  const lyrics = clean(b.lyrics, 30000).replace(/\r\n?/g, '\n');
-  return { id: old ? old.id : crypto.randomBytes(6).toString('hex'), title: clean(b.title, 120).trim() || 'Untitled',
-    artist: clean(b.artist, 120).trim(), lyrics, fav: !!b.fav, updated: Date.now() };
+// ---- library: the controller owns its data (stored on the device); the server keeps a merged backup copy ----
+const arr = (a, n) => Array.isArray(a) ? a.slice(0, n) : [];
+const ts = v => { v = Number(v); return isFinite(v) ? v : 0; };
+const sid = v => clean(v, 40).replace(/[^\w-]/g, '');
+function cleanLib(l) {
+  l = l && typeof l === 'object' ? l : {};
+  const tomb = {}; Object.keys(l.tomb && typeof l.tomb === 'object' ? l.tomb : {}).slice(0, 5000).forEach(k => { const id = sid(k); if (id) tomb[id] = ts(l.tomb[k]); });
+  return {
+    songs: arr(l.songs, MAX_SONGS).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), title: clean(x.title, 120), artist: clean(x.artist, 120),
+      text: clean(x.text, 30000).replace(/\r\n?/g, '\n'), arrangement: Array.isArray(x.arrangement) ? x.arrangement.slice(0, 300).map(n => Math.max(0, Math.min(500, parseInt(n, 10) || 0))) : null,
+      fav: !!x.fav, updated: ts(x.updated) })),
+    schedules: arr(l.schedules, 500).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), name: clean(x.name, 120), updated: ts(x.updated),
+      items: arr(x.items, 300).filter(i => i && sid(i.id)).map(i => ({ id: sid(i.id), type: i.type === 'text' ? 'text' : 'song', songId: sid(i.songId),
+        title: clean(i.title, 120), text: clean(i.text, 5000), note: clean(i.note, 300) })) })),
+    presets: arr(l.presets, 200).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), name: clean(x.name, 60), style: cleanStyle(x.style), updated: ts(x.updated) })),
+    tomb
+  };
 }
-function upsert(ses, b) {
-  const i = b.id ? ses.songs.findIndex(x => x.id === b.id) : -1;
-  if (i < 0 && ses.songs.length >= MAX_SONGS) return null;
-  const s = cleanSong(b, i >= 0 ? ses.songs[i] : null);
-  if (i >= 0) ses.songs[i] = s; else ses.songs.push(s);
-  return s;
+const mergeCol = (a, b, tomb) => { const m = new Map(); a.concat(b).forEach(x => { const o = m.get(x.id); if (!o || x.updated > o.updated) m.set(x.id, x); });
+  return Array.from(m.values()).filter(x => !(tomb[x.id] >= x.updated)); };
+function mergeLib(base, inc) {
+  const tomb = Object.assign({}, base.tomb); Object.keys(inc.tomb).forEach(k => { tomb[k] = Math.max(tomb[k] || 0, inc.tomb[k]); });
+  const keep = Object.keys(tomb).sort((x, y) => tomb[y] - tomb[x]).slice(0, 5000), t = {}; keep.forEach(k => { t[k] = tomb[k]; });
+  return { songs: mergeCol(base.songs, inc.songs, t), schedules: mergeCol(base.schedules, inc.schedules, t), presets: mergeCol(base.presets, inc.presets, t), tomb: t };
 }
-app.post('/api/s/:code/songs', auth, (req, res) => {
-  const s = upsert(req.ses, req.body || {}); if (!s) return res.status(400).json({ error: 'Song limit reached' });
-  save(); bc(req.code, { t: 'songs', songs: req.ses.songs }, 'control'); res.json(s);
-});
-app.post('/api/s/:code/songs/bulk', auth, (req, res) => {
-  const list = Array.isArray(req.body && req.body.songs) ? req.body.songs.slice(0, 500) : [];
-  let n = 0; list.forEach(b => { if (b && typeof b === 'object' && upsert(req.ses, { title: b.title, artist: b.artist, lyrics: b.lyrics, fav: b.fav })) n++; });
-  save(); bc(req.code, { t: 'songs', songs: req.ses.songs }, 'control'); res.json({ added: n });
-});
-app.delete('/api/s/:code/songs/:id', auth, (req, res) => {
-  req.ses.songs = req.ses.songs.filter(x => x.id !== req.params.id); save();
-  bc(req.code, { t: 'songs', songs: req.ses.songs }, 'control'); res.json({ ok: true });
-});
-app.post('/api/s/:code/songs/delete', auth, (req, res) => {
-  const ids = new Set(Array.isArray(req.body && req.body.ids) ? req.body.ids : []);
-  req.ses.songs = req.ses.songs.filter(x => !ids.has(x.id)); save();
-  bc(req.code, { t: 'songs', songs: req.ses.songs }, 'control'); res.json({ ok: true });
+function L(s) {
+  if (!s.lib) { s.lib = cleanLib({ songs: (s.songs || []).map(x => ({ id: x.id, title: x.title, artist: x.artist, text: x.lyrics, fav: x.fav, updated: x.updated })), presets: s.presets });
+    s.libRev = 0; delete s.songs; delete s.presets; }
+  return s.lib;
+}
+app.get('/api/s/:code/data', auth, (req, res) => res.json({ lib: L(req.ses), libRev: req.ses.libRev || 0, state: pub(req.ses) }));
+app.put('/api/s/:code/library', auth, (req, res) => {
+  const merged = mergeLib(L(req.ses), cleanLib(req.body && req.body.lib));
+  if (JSON.stringify(merged) !== JSON.stringify(req.ses.lib)) { req.ses.lib = merged; req.ses.libRev = (req.ses.libRev || 0) + 1; save(); bc(req.code, { t: 'lib', rev: req.ses.libRev }, 'control'); }
+  res.json({ lib: req.ses.lib, rev: req.ses.libRev || 0 });
 });
 app.post('/api/s/:code/live', auth, (req, res) => {
   const b = req.body || {}, L = req.ses.live;
@@ -177,11 +193,6 @@ app.post('/api/s/:code/live', auth, (req, res) => {
 app.post('/api/s/:code/style', auth, (req, res) => {
   req.ses.style = cleanStyle(req.body && req.body.style, req.ses.style); req.ses.live.rev++; save();
   bc(req.code, { t: 'state', state: pub(req.ses) }); res.json({ style: req.ses.style });
-});
-app.post('/api/s/:code/presets', auth, (req, res) => {
-  const list = Array.isArray(req.body && req.body.presets) ? req.body.presets.slice(0, 100) : [];
-  req.ses.presets = list.map(p => ({ id: clean(p.id, 24) || crypto.randomBytes(4).toString('hex'), name: clean(p.name, 60) || 'Preset', style: cleanStyle(p.style) }));
-  save(); bc(req.code, { t: 'presets', presets: req.ses.presets }, 'control'); res.json({ presets: req.ses.presets });
 });
 app.post('/api/s/:code/regenerate', auth, (req, res) => {
   const code = newCode(); db.sessions[code] = req.ses; delete db.sessions[req.code]; save();
