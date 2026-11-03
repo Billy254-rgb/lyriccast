@@ -14,17 +14,35 @@ const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const MAX_SONGS = 2000;
 
 // ---------- storage (starts empty; nothing is seeded) ----------
-let db = { sessions: {} };
-try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); if (!db.sessions) db.sessions = {}; } catch (e) { /* first run */ }
-let saveTimer = null;
-function save() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
-    const tmp = FILE + '.tmp';
-    fs.writeFile(tmp, JSON.stringify(db), err => { if (!err) fs.rename(tmp, FILE, () => {}); });
-  }, 400);
+// Without DATABASE_URL the data is a JSON file. With DATABASE_URL (any Postgres, for example a free Neon or Supabase database)
+// the data is kept in Postgres, so it survives restarts and redeploys on hosts with no persistent disk.
+const DATABASE_URL = process.env.DATABASE_URL || '';
+let db = { sessions: {}, accounts: {} }, pool = null, saveTimer = null, writing = false, dirty = false;
+async function initStore() {
+  if (DATABASE_URL) {
+    const { Pool } = require('pg');
+    pool = new Pool({ connectionString: DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false } });
+    await pool.query('create table if not exists lyriccast_kv (id text primary key, data jsonb not null)');
+    const r = await pool.query("select data from lyriccast_kv where id = 'db'");
+    if (r.rows[0]) db = r.rows[0].data;
+    console.log('Storage: Postgres');
+  } else {
+    try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (e) { /* first run */ }
+    console.log('Storage: file ' + FILE + ' (use DATABASE_URL to survive host restarts)');
+  }
+  if (!db.sessions) db.sessions = {}; if (!db.accounts) db.accounts = {};
 }
+async function flush() {
+  if (writing) { dirty = true; return; } writing = true; dirty = false;
+  try {
+    if (pool) await pool.query("insert into lyriccast_kv (id, data) values ('db', $1) on conflict (id) do update set data = excluded.data", [JSON.stringify(db)]);
+    else { try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {} const tmp = FILE + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, FILE); }
+  } catch (e) { console.error('Save failed:', e.message); }
+  writing = false; if (dirty) flush();
+}
+function save() { clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400); }
+async function shutdown() { clearTimeout(saveTimer); await flush(); process.exit(0); }
+process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 
 // ---------- style schema (one neutral default; presets are user-made only) ----------
 const DEFAULT_STYLE = {
@@ -125,6 +143,34 @@ app.post('/api/session/restore', limiter(30, 3600000), (req, res) => {
   db.sessions[code] = makeSession(key); save(); res.json({ fresh: true });
 });
 
+
+// ---------- accounts: a username and password that point to your session, so any device can open your songs ----------
+const scrypt = (pw, salt) => new Promise((res, rej) => crypto.scrypt(pw, salt, 64, (e, k) => e ? rej(e) : res(k)));
+const lname = n => String(n || '').trim().toLowerCase();
+app.post('/api/auth/register', limiter(10, 3600000), async (req, res) => {
+  try {
+    const b = req.body || {}, name = String(b.name || '').trim(), pw = String(b.password || '');
+    if (!/^[A-Za-z0-9._-]{3,32}$/.test(name)) return res.status(400).json({ error: 'Username must be 3 to 32 letters, numbers, dots, dashes or underscores.' });
+    if (pw.length < 8 || pw.length > 128) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    if (db.accounts[lname(name)]) return res.status(409).json({ error: 'That username is taken. Try another, or sign in.' });
+    let code = String(b.code || '').toUpperCase(), ses = db.sessions[code];
+    if (ses && eq(String(b.key || ''), ses.key)) { if (Object.values(db.accounts).some(a => a.code === code)) return res.status(409).json({ error: 'This session already belongs to an account. Sign in instead.' }); }
+    else { code = newCode(); ses = db.sessions[code] = makeSession(crypto.randomBytes(18).toString('hex')); }
+    const salt = crypto.randomBytes(16).toString('hex');
+    db.accounts[lname(name)] = { name, salt, hash: (await scrypt(pw, salt)).toString('hex'), code, created: Date.now() };
+    save(); res.json({ code, key: ses.key, name });
+  } catch (e) { res.status(500).json({ error: 'Could not create the account.' }); }
+});
+app.post('/api/auth/login', limiter(20, 900000), async (req, res) => {
+  try {
+    const b = req.body || {}, acc = db.accounts[lname(b.name)], pw = String(b.password || '').slice(0, 128);
+    const salt = acc ? acc.salt : crypto.randomBytes(16).toString('hex'), h = (await scrypt(pw, salt)).toString('hex');
+    if (!acc || !eq(h, acc.hash)) return res.status(401).json({ error: 'Wrong username or password.' });
+    let ses = db.sessions[acc.code]; if (!ses) { ses = db.sessions[acc.code] = makeSession(crypto.randomBytes(18).toString('hex')); save(); }
+    res.json({ code: acc.code, key: ses.key, name: acc.name });
+  } catch (e) { res.status(500).json({ error: 'Could not sign in.' }); }
+});
+
 // public (read-only) endpoints used by the output page and vMix data sources
 function getSes(req, res) { const s = db.sessions[String(req.params.code).toUpperCase()]; if (!s) res.status(404).json({ error: 'Session not found' }); return s; }
 app.get('/api/s/:code/state', (req, res) => { const s = getSes(req, res); if (!s) return; res.set('Cache-Control', 'no-store'); res.json(pub(s)); });
@@ -159,7 +205,7 @@ function cleanLib(l) {
     songs: arr(l.songs, MAX_SONGS).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), title: clean(x.title, 120), artist: clean(x.artist, 120),
       text: clean(x.text, 30000).replace(/\r\n?/g, '\n'), arrangement: Array.isArray(x.arrangement) ? x.arrangement.slice(0, 300).map(n => Math.max(0, Math.min(500, parseInt(n, 10) || 0))) : null,
       fav: !!x.fav, updated: ts(x.updated) })),
-    schedules: arr(l.schedules, 500).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), name: clean(x.name, 120), updated: ts(x.updated),
+    schedules: arr(l.schedules, 500).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), name: clean(x.name, 120), date: /^\d{4}-\d{2}-\d{2}$/.test(String(x.date)) ? String(x.date) : '', updated: ts(x.updated),
       items: arr(x.items, 300).filter(i => i && sid(i.id)).map(i => ({ id: sid(i.id), type: i.type === 'text' ? 'text' : 'song', songId: sid(i.songId),
         title: clean(i.title, 120), text: clean(i.text, 5000), note: clean(i.note, 300) })) })),
     presets: arr(l.presets, 200).filter(x => x && sid(x.id)).map(x => ({ id: sid(x.id), name: clean(x.name, 60), style: cleanStyle(x.style), updated: ts(x.updated) })),
@@ -195,7 +241,8 @@ app.post('/api/s/:code/style', auth, (req, res) => {
   bc(req.code, { t: 'state', state: pub(req.ses) }); res.json({ style: req.ses.style });
 });
 app.post('/api/s/:code/regenerate', auth, (req, res) => {
-  const code = newCode(); db.sessions[code] = req.ses; delete db.sessions[req.code]; save();
+  const code = newCode(); db.sessions[code] = req.ses; delete db.sessions[req.code];
+  Object.keys(db.accounts).forEach(k => { if (db.accounts[k].code === req.code) db.accounts[k].code = code; }); save();
   (clients.get(req.code) || []).forEach(c => { try { c.ws ? c.ws.close(4004) : c.res.end(); } catch (e) {} });
   clients.delete(req.code); res.json({ code });
 });
@@ -217,4 +264,4 @@ wss.on('connection', (ws, req) => {
 });
 setInterval(() => wss.clients.forEach(ws => { if (!ws.isAlive) return ws.terminate(); ws.isAlive = false; try { ws.ping(); } catch (e) {} }), 25000).unref();
 
-server.listen(PORT, () => console.log('LyricCast running on port ' + PORT));
+initStore().then(() => server.listen(PORT, () => console.log('LyricCast running on port ' + PORT))).catch(e => { console.error('Could not start:', e.message); process.exit(1); });
