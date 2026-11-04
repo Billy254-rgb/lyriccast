@@ -27,7 +27,7 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&a
 const ic = n => '<svg class="i" aria-hidden="true"><use href="#i-' + n + '"/></svg>';
 const uid = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '').slice(0, 12) : Math.random().toString(36).slice(2, 14));
 const hue = s => { s = String(s).toLowerCase().replace(/\d+/g, '').trim(); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; };
-function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), 2400); }
+function toast(m, ms) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), ms || 2400); }
 const buzz = () => { try { navigator.vibrate && navigator.vibrate(12); } catch (e) {} };
 const canLive = () => !!(D.session && ws && ws.readyState === 1);
 const findSong = id => D.songs.find(s => s.id === id);
@@ -383,7 +383,11 @@ $('#acGo').onclick = async () => { const name = $('#acN').value.trim(), pw = $('
   const btn = $('#acGo'); btn.disabled = true;
   try { const j = acMode === 'log' ? await auth('login', { name, password: pw }) : await auth('register', { name, password: pw, code: D.session && D.session.code, key: D.session && D.session.key });
     D.account = { name: j.name }; persist('account'); $('#acP').value = $('#acP2').value = ''; await link({ code: j.code, key: j.key }); toast(acMode === 'log' ? 'Signed in. Syncing your songs.' : 'Account created'); }
-  catch (e) { toast(e.message); } btn.disabled = false; };
+  catch (e) { toast(acMode === 'log' && /Wrong username/.test(e.message) ? e.message + ' If this worked before, the server may have lost its data. On a device that is still signed in, open Connect and tap Re-save my account.' : e.message, acMode === 'log' ? 8000 : 0); } btn.disabled = false; };
+$('#acFix').onclick = async () => { if (!D.session) return;
+  const r = await dlg({ title: 'Re-save my account', msg: 'Use this if signing in on another device says wrong username or password. Enter your username and password again to save them on the server.', ok: 'Save account', fields: [{ id: 'n', label: 'Username', value: D.account ? D.account.name : '' }, { id: 'p', label: 'Password', type: 'password', value: '' }] }); if (!r) return;
+  try { await restore(); await auth('register', { name: r.vals.n.trim(), password: r.vals.p, code: D.session.code, key: D.session.key }); D.account = { name: r.vals.n.trim() }; persist('account'); renderConnect(); sync(); toast('Account saved. You can sign in on other devices again.', 5000); }
+  catch (e) { toast(e.message, 6000); } };
 const copy = t => { (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Copied')).catch(() => { const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand('copy'); toast('Copied'); } catch (e) { toast('Copy failed. Select the link and copy it.'); } a.remove(); }); };
 $('#copy').onclick = () => copy(location.origin + '/o/' + D.session.code); $('#copyTxt').onclick = () => copy(location.origin + '/api/s/' + D.session.code + '/current.txt');
 $('#showKey').onclick = () => { const b = $('#keyBox'); b.hidden = !b.hidden; b.textContent = D.session.key; $('#showKey').textContent = b.hidden ? 'Show control key' : 'Hide control key'; };
