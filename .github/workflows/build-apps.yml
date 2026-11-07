@@ -1,0 +1,81 @@
+name: Build apps
+
+# Run it from the Actions tab: choose "Build apps", then "Run workflow".
+# When it finishes, open the run and download the files under "Artifacts".
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows app
+    runs-on: windows-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Assemble the Windows app
+        shell: bash
+        run: |
+          mkdir -p desktop/www
+          cp controller.html desktop/www/index.html
+          cp app.js output.html icon.svg desktop/www/
+          cp electron-main.js desktop/main.js
+          cp electron-package.json desktop/package.json
+          cp app-icon.png desktop/icon.png
+      - name: Install
+        working-directory: desktop
+        run: npm install
+      - name: Build the installer
+        working-directory: desktop
+        run: npx electron-builder --win --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LyricCast-Windows
+          path: desktop/dist/*.exe
+          if-no-files-found: error
+
+  android:
+    name: Android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Assemble the Android app
+        run: |
+          mkdir -p mobile/www mobile/assets
+          cp controller.html mobile/www/index.html
+          cp app.js output.html icon.svg mobile/www/
+          cp capacitor.config.json mobile/
+          cp mobile-package.json mobile/package.json
+          cp app-icon.png mobile/assets/icon-only.png
+          cp app-icon-foreground.png mobile/assets/icon-foreground.png
+          cp app-icon-background.png mobile/assets/icon-background.png
+      - name: Install
+        working-directory: mobile
+        run: npm install
+      - name: Create the Android project
+        working-directory: mobile
+        run: |
+          npx cap add android
+          npx capacitor-assets generate --android
+          npx cap sync android
+      - name: Build the APK
+        working-directory: mobile/android
+        run: ./gradlew assembleDebug
+      - name: Name the file
+        run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk LyricCast.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LyricCast-Android
+          path: LyricCast.apk
+          if-no-files-found: error
