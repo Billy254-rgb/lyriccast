@@ -19,6 +19,9 @@ jobs:
       - name: Assemble the Windows app
         shell: bash
         run: |
+          for f in controller.html app.js output.html icon.svg electron-main.js electron-package.json app-icon.png; do
+            if [ ! -f "$f" ]; then echo "MISSING FILE IN THE REPOSITORY: $f"; exit 1; fi
+          done
           mkdir -p desktop/www
           cp controller.html desktop/www/index.html
           cp app.js output.html icon.svg desktop/www/
@@ -39,19 +42,22 @@ jobs:
 
   android:
     name: Android app
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
       - uses: android-actions/setup-android@v3
       - name: Assemble the Android app
         run: |
+          for f in controller.html app.js output.html icon.svg capacitor.config.json mobile-package.json app-icon.png app-icon-foreground.png app-icon-background.png; do
+            if [ ! -f "$f" ]; then echo "MISSING FILE IN THE REPOSITORY: $f"; exit 1; fi
+          done
           mkdir -p mobile/www mobile/assets
           cp controller.html mobile/www/index.html
           cp app.js output.html icon.svg mobile/www/
