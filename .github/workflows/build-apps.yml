@@ -52,7 +52,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
+      - name: Prepare the Android SDK (already installed on the runner)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" || true
       - name: Assemble the Android app
         run: |
           for f in controller.html app.js output.html icon.svg capacitor.config.json mobile-package.json app-icon.png app-icon-foreground.png app-icon-background.png; do
@@ -77,7 +82,7 @@ jobs:
           npx cap sync android
       - name: Build the APK
         working-directory: mobile/android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --no-daemon
       - name: Name the file
         run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk LyricCast.apk
       - uses: actions/upload-artifact@v4
