@@ -6,6 +6,12 @@ const DEF = { font: 'sans', weight: 700, size: 64, spacing: 0, lh: 1.15, color: 
   bar: true, barColor: '#0b0b14', barOpacity: 0.78, radius: 14, padX: 44, padY: 22, blur: 0, accent: true, accentColor: '#d4a84b', fit: 'text', pos: 'center', align: 'center',
   offX: 0, offY: 90, anim: 'fade', dur: 300, rows: 1, showTag: false, showNext: false, nextScale: 0.55 };
 const D = { songs: [], schedules: [], presets: [], tomb: {}, set: {}, style: Object.assign({}, DEF), session: null, draft: null, account: null };
+// NATIVE is true inside the installed Windows and Android apps. They carry their own copy of this screen and talk to your server by address.
+const NATIVE = location.protocol === 'lyriccast:' || !!window.Capacitor;
+const base = () => NATIVE ? String(D.set.server || '') : '';
+const origin = () => NATIVE ? base() : location.origin;
+const wsOrigin = () => NATIVE ? base().replace(/^http/i, 'ws') : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+const LOCAL_URL = NATIVE ? 'output.html?local=1' : '/o/LOCAL?local=1';
 const KEYS = ['songs', 'schedules', 'presets', 'tomb', 'set', 'style', 'session', 'draft', 'account'];
 let ws = null, wsFails = 0, outputs = 0, lat = null, serverLive = { visible: false }, libRev = -1, pingT = null;
 let SEL = null, LV = null, frozen = false, ED = null, syncing = false, syncAgain = false, syncState = '', reorder = false, view = 'lyr', styleBusy = false;
@@ -90,7 +96,7 @@ function modelOf(ref) {
 
 /* ---------- server api ---------- */
 async function raw(path, method, body) {
-  let r; try { r = await fetch('/api/s/' + D.session.code + path, { method: method || 'GET', headers: { 'content-type': 'application/json', 'x-key': D.session.key }, body: body ? JSON.stringify(body) : undefined }); }
+  let r; try { r = await fetch(base() + '/api/s/' + D.session.code + path, { method: method || 'GET', headers: { 'content-type': 'application/json', 'x-key': D.session.key }, body: body ? JSON.stringify(body) : undefined }); }
   catch (e) { throw new Error('Offline'); }
   return { r, j: await r.json().catch(() => ({})) };
 }
@@ -102,11 +108,11 @@ async function api(path, method, body) {
 }
 // If the host lost its data, re-register the same code and key, then re-send our style.
 async function restore() {
-  try { const r = await fetch('/api/session/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(D.session) }); const j = await r.json();
+  try { const r = await fetch(base() + '/api/session/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(D.session) }); const j = await r.json();
     if (!r.ok) return false; if (j.fresh) await raw('/style', 'POST', { style: D.style }); return true; } catch (e) { return false; }
 }
 async function auth(path, body) {
-  let r; try { r = await fetch('/api/auth/' + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); } catch (e) { throw new Error('You are offline. Your songs still work.'); }
+  let r; try { r = await fetch(base() + '/api/auth/' + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); } catch (e) { throw new Error('You are offline. Your songs still work.'); }
   const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Request failed'); return j;
 }
 
@@ -132,7 +138,7 @@ async function sync() {
 function connect() {
   if (!D.session) return; clearTimeout(connect.t);
   if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} }
-  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?code=' + D.session.code + '&role=control&key=' + encodeURIComponent(D.session.key));
+  ws = new WebSocket(wsOrigin() + '/ws?code=' + D.session.code + '&role=control&key=' + encodeURIComponent(D.session.key));
   ws.onopen = async () => { wsFails = 0; $('#banner').classList.remove('on'); clearInterval(pingT); ping(); pingT = setInterval(ping, 5000); updStatus(); await afterConnect(); };
   ws.onmessage = e => { let d; try { d = JSON.parse(e.data); } catch (x) { return; }
     if (d.t === 'state') { serverLive = d.state; if (JSON.stringify(d.state.style) !== JSON.stringify(D.style) && !styleBusy) { D.style = Object.assign({}, DEF, d.state.style); persist('style'); syncDesign(); pushLocal(); } renderLive(); }
@@ -150,7 +156,7 @@ async function afterConnect() {
   try { const d = await api('/data'); serverLive = d.state;
     if (D.set.pendStyle) { const r = await api('/style', 'POST', { style: D.style }); D.style = r.style; D.set.pendStyle = false; persist('set'); } else D.style = Object.assign({}, DEF, d.state.style);
     persist('style'); libRev = d.libRev; mergeIn(d.lib); syncDesign(); pushLocal(); await sync();
-    const f = $('#pvReal'); if (!f.getAttribute('src')) f.src = '/o/' + D.session.code + '?preview=1'; renderLive();
+    const f = $('#pvReal'); if (!f.getAttribute('src')) f.src = origin() + '/o/' + D.session.code + '?preview=1'; renderLive();
   } catch (e) { toast(e.message); }
 }
 function updStatus() {
@@ -165,7 +171,7 @@ function updStatus() {
 }
 
 /* ---------- local style preview ---------- */
-function post(frame, p) { frame._p = p; try { frame.contentWindow.postMessage({ lc: 1, state: p }, location.origin); } catch (e) {} }
+function post(frame, p) { frame._p = p; try { frame.contentWindow.postMessage({ lc: 1, state: p }, location.origin === 'null' ? '*' : location.origin); } catch (e) {} }
 function payloadFor(m, i) { const s = m && m.slides[i]; if (!s) return null;
   return { line: s.text, next: m.slides[i + 1] ? m.slides[i + 1].text : '', title: m.title, artist: m.artist, tag: m.kind === 'song' && i === 0, visible: true, style: D.style }; }
 function pushLocal() { const p = (LV && LV.idx >= 0 && payloadFor(LV.m, LV.idx)) || (SEL && payloadFor(SEL.m, 0)) || { line: 'Your lyric line appears here', next: '', title: '', artist: '', tag: false, visible: true, style: D.style }; post($('#pvLocal2'), p); }
@@ -372,13 +378,27 @@ $('#preApply').onclick = () => { const p = D.presets.find(x => x.id === $('#preS
   if (canLive()) api('/style', 'POST', { style: D.style }).then(r => { D.style = Object.assign({}, DEF, r.style); D.set.pendStyle = false; persist('set'); persist('style'); }).catch(() => {}); toast('Preset applied'); };
 $('#preDel').onclick = async () => { const id = $('#preSel').value; if (!id || !await confirmD('Delete this preset?', '')) return; tombstone(id); D.presets = D.presets.filter(p => p.id !== id); touch('presets'); renderPresets(); };
 
+/* ---------- server address (installed apps) ---------- */
+const normServer = v => { v = String(v || '').trim().replace(/\/+$/, ''); if (!v) return ''; return /^https?:\/\//i.test(v) ? v : 'https://' + v; };
+async function checkServer(url) { try { const r = await fetch(url + '/healthz', { cache: 'no-store' }); return r.ok && (await r.text()).trim() === 'ok'; } catch (e) { return false; } }
+async function askServer() {
+  const r = await dlg({ title: 'Your LyricCast server', msg: 'Enter the address of the server that sends lyrics to vMix, for example https://lyriccast.onrender.com. Your songs and schedules work without it, and the internet is only needed while you project.', ok: 'Save', fields: [{ id: 'u', label: 'Server address', value: D.set.server || '', max: 200 }] });
+  if (!r) return false; const url = normServer(r.vals.u); if (!url) return false; toast('Checking the server...', 3000);
+  if (!await checkServer(url)) { toast('Could not reach a LyricCast server at that address. Check the address and your internet.', 6000); return false; }
+  if (D.set.server && url !== D.set.server && D.session) { if (!await confirmD('Change server?', 'You will be signed out of the current server. Your songs stay on this device.', 'Change')) return false;
+    disconnect(); D.session = null; D.account = null; persist('session'); persist('account'); LV = null; $('#pvReal').removeAttribute('src'); }
+  D.set.server = url; persist('set'); renderConnect(); updStatus(); toast('Server saved'); return true;
+}
+const needServer = () => { if (NATIVE && !base()) { askServer(); return false; } return true; };
+
 /* ---------- connect and account ---------- */
 let acMode = 'reg';
-function renderConnect() { const s = D.session; $('#hasSes').hidden = !s; $('#acIn').hidden = !(s && D.account); $('#acOut').hidden = !!(s && D.account);
+function renderConnect() { const s = D.session; $('#srvCard').hidden = !NATIVE; $('#srvTxt').textContent = base() || 'No server set yet. It is needed to send lyrics to vMix.'; $('#hasSes').hidden = !s; $('#acIn').hidden = !(s && D.account); $('#acOut').hidden = !!(s && D.account);
   if (D.account) $('#acName').textContent = 'You are signed in as ' + D.account.name + '. Your songs open on every device you sign in on.';
-  if (!s) return; $('#code').textContent = s.code; $('#url').textContent = location.origin + '/o/' + s.code; }
+  if (!s) return; $('#code').textContent = s.code; $('#url').textContent = origin() + '/o/' + s.code; }
 $('#acSeg').onclick = e => { const b = e.target.closest('button'); if (!b) return; acMode = b.dataset.m; $$('#acSeg button').forEach(x => x.classList.toggle('on', x === b)); $('#acP2w').hidden = acMode === 'log'; $('#acGo').textContent = acMode === 'log' ? 'Sign in' : 'Create account'; $('#acP').autocomplete = acMode === 'log' ? 'current-password' : 'new-password'; };
-$('#acGo').onclick = async () => { const name = $('#acN').value.trim(), pw = $('#acP').value; if (!name || !pw) return toast('Enter a username and password');
+$('#srvBtn').onclick = askServer;
+$('#acGo').onclick = async () => { if (!needServer()) return; const name = $('#acN').value.trim(), pw = $('#acP').value; if (!name || !pw) return toast('Enter a username and password');
   if (acMode === 'reg' && pw !== $('#acP2').value) return toast('The passwords do not match');
   const btn = $('#acGo'); btn.disabled = true;
   try { const j = acMode === 'log' ? await auth('login', { name, password: pw }) : await auth('register', { name, password: pw, code: D.session && D.session.code, key: D.session && D.session.key });
@@ -389,12 +409,12 @@ $('#acFix').onclick = async () => { if (!D.session) return;
   try { await restore(); await auth('register', { name: r.vals.n.trim(), password: r.vals.p, code: D.session.code, key: D.session.key }); D.account = { name: r.vals.n.trim() }; persist('account'); renderConnect(); sync(); toast('Account saved. You can sign in on other devices again.', 5000); }
   catch (e) { toast(e.message, 6000); } };
 const copy = t => { (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Copied')).catch(() => { const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand('copy'); toast('Copied'); } catch (e) { toast('Copy failed. Select the link and copy it.'); } a.remove(); }); };
-$('#copy').onclick = () => copy(location.origin + '/o/' + D.session.code); $('#copyTxt').onclick = () => copy(location.origin + '/api/s/' + D.session.code + '/current.txt');
+$('#copy').onclick = () => copy(origin() + '/o/' + D.session.code); $('#copyTxt').onclick = () => copy(origin() + '/api/s/' + D.session.code + '/current.txt');
 $('#showKey').onclick = () => { const b = $('#keyBox'); b.hidden = !b.hidden; b.textContent = D.session.key; $('#showKey').textContent = b.hidden ? 'Show control key' : 'Hide control key'; };
 async function link(session) { D.session = session; persist('session'); $('#pvReal').removeAttribute('src'); renderConnect(); connect(); updStatus(); }
-$('#mk').onclick = async () => { try { const r = await fetch('/api/session', { method: 'POST' }), j = await r.json(); if (!r.ok) throw new Error(j.error || 'Failed'); await link(j); toast('Session created'); } catch (e) { toast(e.message === 'Failed to fetch' ? 'You are offline. Everything else still works.' : e.message); } };
-$('#jn').onclick = async () => { const code = $('#jc').value.trim().toUpperCase(), key = $('#jk').value.trim(); if (!code || !key) return toast('Enter both the code and the key');
-  try { const r = await fetch('/api/s/' + code + '/data', { headers: { 'x-key': key } }); if (!r.ok) return toast('Code or key not recognised'); await link({ code, key }); toast('Joined'); } catch (e) { toast('You are offline.'); } };
+$('#mk').onclick = async () => { if (!needServer()) return; try { const r = await fetch(base() + '/api/session', { method: 'POST' }), j = await r.json(); if (!r.ok) throw new Error(j.error || 'Failed'); await link(j); toast('Session created'); } catch (e) { toast(e.message === 'Failed to fetch' ? 'You are offline. Everything else still works.' : e.message); } };
+$('#jn').onclick = async () => { if (!needServer()) return; const code = $('#jc').value.trim().toUpperCase(), key = $('#jk').value.trim(); if (!code || !key) return toast('Enter both the code and the key');
+  try { const r = await fetch(base() + '/api/s/' + code + '/data', { headers: { 'x-key': key } }); if (!r.ok) return toast('Code or key not recognised'); await link({ code, key }); toast('Joined'); } catch (e) { toast('You are offline.'); } };
 $('#regen').onclick = async () => { if (!await confirmD('New output code?', 'The link in vMix stops working until you update it.', 'Change code')) return; try { const r = await api('/regenerate', 'POST'); D.session.code = r.code; persist('session'); $('#pvReal').removeAttribute('src'); renderConnect(); connect(); toast('New code ready'); } catch (e) { toast(e.message); } };
 $('#leave').onclick = async () => { const r = await dlg({ title: 'Sign out?', msg: 'Your songs stay in your account. Choose whether to keep a copy on this device.', actions: [{ label: 'Sign out, keep songs here', value: 'keep', cls: 'pri' }, { label: 'Sign out and erase this device', value: 'erase', cls: 'danger' }] }); if (!r) return;
   if (ws) { ws.onclose = null; ws.close(); } ws = null; D.session = null; D.account = null; persist('session'); persist('account'); $('#pvReal').removeAttribute('src'); LV = null;
@@ -424,9 +444,10 @@ $('#pvLocal2').addEventListener('load', () => post($('#pvLocal2'), $('#pvLocal2'
 function renderAll() { renderSchedule(); renderSongs(); renderPresets(); renderConnect(); renderSearch(); if (SEL) SEL.m = modelOf(SEL.ref); if (LV) LV.m = modelOf(LV.ref); renderLyrics(); renderLive(); updStatus(); }
 (async () => {
   await loadAll(); if (D.set.theme) document.documentElement.dataset.theme = D.set.theme;
-  $('#pvLocal2').src = '/o/LOCAL?local=1'; buildDesign();
+  $('#pvLocal2').src = LOCAL_URL; buildDesign();
   const sc = curSched(); if (sc && sc.items[0]) { SEL = { ref: sc.items[0], m: modelOf(sc.items[0]), key: refKey(sc.items[0]), itemId: sc.items[0].id }; }
   renderAll(); setView(innerWidth < 1000 && sc && sc.items.length ? 'sch' : 'lyr'); wake();
   if (D.draft && (D.draft.text || D.draft.title)) { const s = D.draft.id && findSong(D.draft.id); setView('songs'); openEd(s || null, D.draft); }
-  if (D.session) connect(); if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if (NATIVE && !D.set.server && !D.set.srvAsked) { D.set.srvAsked = true; persist('set'); setTimeout(askServer, 700); }
+  if (D.session) connect(); if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 })();

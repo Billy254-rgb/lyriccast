@@ -1,0 +1,8 @@
+{
+  "appId": "app.lyriccast.mobile",
+  "appName": "LyricCast",
+  "webDir": "www",
+  "backgroundColor": "#07070d",
+  "server": { "androidScheme": "https" },
+  "android": { "allowMixedContent": false }
+}

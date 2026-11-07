@@ -21,7 +21,8 @@ let db = { sessions: {}, accounts: {} }, pool = null, saveTimer = null, writing 
 async function initStore() {
   if (DATABASE_URL) {
     const { Pool } = require('pg');
-    pool = new Pool({ connectionString: DATABASE_URL, max: 3, ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false } });
+    pool = new Pool({ connectionString: DATABASE_URL, max: 3, connectionTimeoutMillis: 15000, ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false } });
+    if (pool.on) pool.on('error', e => console.error('Database connection error (will reconnect):', e.message));
     await pool.query('create table if not exists lyriccast_kv (id text primary key, data jsonb not null)');
     const r = await pool.query("select data from lyriccast_kv where id = 'db'");
     if (r.rows[0]) db = r.rows[0].data;
@@ -37,7 +38,7 @@ async function flush() {
   try {
     if (pool) await pool.query("insert into lyriccast_kv (id, data) values ('db', $1) on conflict (id) do update set data = excluded.data", [JSON.stringify(db)]);
     else { try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {} const tmp = FILE + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, FILE); }
-  } catch (e) { console.error('Save failed:', e.message); }
+  } catch (e) { console.error('Save failed, retrying in 5s:', e.message); dirty = false; clearTimeout(saveTimer); saveTimer = setTimeout(flush, 5000); }
   writing = false; if (dirty) flush();
 }
 function save() { clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400); }
@@ -101,7 +102,13 @@ function presence(code) {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use((req, res, next) => { res.set('X-Content-Type-Options', 'nosniff'); next(); });
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  // The installed Windows and Android apps call this server from their own origin. The control key travels in a header, never in cookies.
+  res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'content-type, x-key', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Max-Age': '86400' });
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.use(express.json({ limit: '6mb' }));
 
 const hits = new Map();
